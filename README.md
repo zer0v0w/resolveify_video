@@ -49,7 +49,7 @@ bash
 #### Convert a single video file
 resolveify_dir "my_video.mp4"
 
-####Convert a single file and keep original
+#### Convert a single file and keep original
 resolveify_dir "my_video.mkv" true
 
 #### Convert an entire folder of videos
