@@ -312,10 +312,9 @@ normalize_dir() {
 }
 
 
-
 resolveify_dir() {
   local src="$1"
-  local keep_originals="${2:-false}"  # Second param: "true" to keep, "false" to delete after confirm
+  local keep_originals="${2:-false}"
   
   # Check for ffmpeg
   if ! command -v ffmpeg &> /dev/null; then
@@ -336,7 +335,7 @@ resolveify_dir() {
     src_dir="$(dirname "$src")"
     src_file="$(basename "$src")"
     
-    # Check if it's a valid video file
+    # Check if it's a valid video file (case insensitive)
     local ext="${src_file:e:l}"
     if [[ ! "$ext" =~ ^(mp4|mkv|mov|webm|avi)$ ]]; then
       echo "❌ Not a supported video file: $src_file"
@@ -359,13 +358,40 @@ resolveify_dir() {
     dst="${src}_resolve"
     mkdir -p "$dst" || return 1
     
-    # Set options for zsh globbing
-    setopt local_options null_glob
-    
-    # Get list of files
-    files_to_process=("$src"/*.(#i)(mp4|mkv|mov|webm|avi))
-    
     echo "📁 Folder mode: $src"
+    echo "🔍 Scanning for video files..."
+    
+    # FIXED: Better file detection with multiple methods
+    setopt local_options null_glob extended_glob
+    
+    # Method 1: Case insensitive pattern
+    files_to_process=("$src"/*.(#i)mp4 "$src"/*.(#i)mkv "$src"/*.(#i)mov "$src"/*.(#i)webm "$src"/*.(#i)avi)
+    
+    # Method 2: If Method 1 found nothing, try manual case handling
+    if [[ ${#files_to_process[@]} -eq 0 ]]; then
+      echo "   Trying alternative detection..."
+      files_to_process=()
+      
+      # Manually add files with common extensions (both cases)
+      for ext in mp4 MP4 mkv MKV mov MOV webm WEBM avi AVI; do
+        for file in "$src"/*.$ext; do
+          [[ -f "$file" ]] && files_to_process+=("$file")
+        done
+      done
+    fi
+    
+    # Method 3: Use find as last resort
+    if [[ ${#files_to_process[@]} -eq 0 ]]; then
+      echo "   Using find command..."
+      while IFS= read -r file; do
+        files_to_process+=("$file")
+      done < <(find "$src" -maxdepth 1 -type f \( -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.mov" -o -iname "*.webm" -o -iname "*.avi" \) 2>/dev/null)
+    fi
+    
+    # Sort files for consistent processing
+    files_to_process=(${(o)files_to_process})
+    
+    echo "   Found ${#files_to_process[@]} files"
     
   else
     echo "❌ Please provide a valid video file or folder"
@@ -392,12 +418,15 @@ resolveify_dir() {
 
   if [[ $total_files -eq 0 ]]; then
     echo "❌ No video files found in: $src"
+    echo "   Supported formats: mp4, mkv, mov, webm, avi"
+    echo "   (case insensitive - MP4, Mp4, .mp4 all work)"
     if [[ ! "$is_single_file" == true ]]; then
       rmdir "$dst" 2>/dev/null
     fi
     return 1
   fi
 
+  echo ""
   echo "📁 Found $total_files video file(s) to convert"
   echo "💾 Available space: $(($available_space / 1024))MB"
   echo ""
@@ -423,7 +452,7 @@ resolveify_dir() {
     # Skip if not a regular file (safety check)
     [[ ! -f "$f" ]] && continue
     
-    local original_size=$(stat -f%z "$f" 2>/dev/null || stat -c%s "$f" 2>/dev/null)
+    local original_size=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null)
     local original_size_mb=$((original_size / 1048576))
     local original_filename="$(basename "$f")"
     local filename_base="${original_filename:r}"
@@ -446,7 +475,7 @@ resolveify_dir() {
       -y \
       "$output" 2>&1 | grep -E "(frame=|Duration:)"; then
       
-      local converted_size=$(stat -f%z "$output" 2>/dev/null || stat -c%s "$output" 2>/dev/null)
+      local converted_size=$(stat -c%s "$output" 2>/dev/null || stat -f%z "$output" 2>/dev/null)
       local converted_size_mb=$((converted_size / 1048576))
       total_converted_size=$((total_converted_size + converted_size))
       total_original_size=$((total_original_size + original_size))
