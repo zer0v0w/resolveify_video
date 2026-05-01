@@ -40,19 +40,19 @@ sudo dnf install ffmpeg
 sudo pacman -S ffmpeg
 ```
 
-### Usage
+## Usage
 1. resolveify_dir - Import videos to DaVinci Resolve
 
 Converts any video to DNxHR (DaVinci Resolve compatible format)
 bash
 
-# Convert a single video file
+### Convert a single video file
 resolveify_dir "my_video.mp4"
 
-# Convert a single file and keep original
+### Convert a single file and keep original
 resolveify_dir "my_video.mkv" true
 
-# Convert an entire folder of videos
+### Convert an entire folder of videos
 resolveify_dir "/path/to/videos"
 
 # Convert folder and auto-delete after confirmation
