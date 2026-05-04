@@ -1,316 +1,179 @@
-
 normalize_dir() {
   local src="$1"
-  local keep_originals="${2:-false}"  # Second param: "true" to keep, "false" to delete after confirm
-  
+  local keep_originals="${2:-false}"
+
   if [[ -z "$src" || ! -d "$src" ]]; then
-    echo "❌ Please provide a valid folder"
+    echo "❌ Invalid folder"
     return 1
   fi
 
-  # Check for ffmpeg and ffprobe
-  if ! command -v ffmpeg &> /dev/null || ! command -v ffprobe &> /dev/null; then
-    echo "❌ ffmpeg/ffprobe not found. Please install them first."
+  setopt extended_glob null_glob
+
+  if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
+    echo "❌ ffmpeg/ffprobe missing"
     return 1
   fi
-  
+
   local dst="${src}_normalized"
   mkdir -p "$dst" || return 1
-  
-  # Check available disk space (in KB)
-  local available_space=$(df "$PWD" | awk 'NR==2 {print $4}')
-  local min_space_required=1048576  # 1GB in KB
-  
-  if [[ $available_space -lt $min_space_required ]]; then
-    echo "⚠️  Low disk space: $(($available_space / 1024))MB available"
-    echo "❌ Need at least 1GB free space. Aborting."
-    return 1
-  fi
-  
-  # Set options for zsh
-  setopt local_options null_glob
-  
-  echo "📁 Converting all video files to standard MP4 format..."
-  echo "💾 Available space: $(($available_space / 1024))MB"
+
+  echo "════════════════════════════"
+  echo "🚀 NORMALIZATION START"
+  echo "📁 Source: $src"
+  echo "📁 Output: $dst"
+  echo "════════════════════════════"
   echo ""
-  
-  local prores_converted=0
-  local normal_converted=0
-  local skipped=0
-  local failed=0
-  
-  # Function to generate unique filename
+
+  local i=0
+  local ok=0
+  local fail=0
+
   get_unique_filename() {
     local dir="$1"
     local base="$2"
     local ext="$3"
-    local counter=0
-    local result="${base}.${ext}"
-    
-    while [[ -f "${dir}/${result}" ]]; do
-      counter=$((counter + 1))
-      result="${base}_${counter}.${ext}"
+    local out="${base}.${ext}"
+    local n=1
+
+    while [[ -f "$dir/$out" ]]; do
+      out="${base}_${n}.${ext}"
+      ((n++))
     done
-    
-    echo "$result"
+
+    echo "$out"
   }
-  
-  # Process all video files (case insensitive)
+
   for f in "$src"/*.(#i)(mov|mp4|mkv|avi|webm); do
-    # Skip if not a file
     [[ -f "$f" ]] || continue
-    
-    echo "🔍 Checking: ${f:t}"
-    
-    # Get filename without extension
-    local original_filename="${f:t:r}"
-    local extension="${f:t:e:l}"  # lowercase extension
-    local output_filename=""
-    local output_path=""
-    local should_convert=false
-    
-    # Check if it's ProRes 422 HQ (only for .mov files)
+    ((i++))
+
+    echo "────────────────────────────"
+    echo "🎬 FILE #$i: ${f:t}"
+    echo "────────────────────────────"
+
+    local base="${f:t:r}"
+    local ext="${f:t:e:l}"
+
+    echo "🔍 Step 1: Detecting format..."
+    echo "   ↳ extension: .$ext"
+
+    local output=""
     local is_prores=false
-    if [[ "$extension" == "mov" ]]; then
-      local codec_info=$(ffprobe -v error -select_streams v:0 \
+
+    if [[ "$ext" == "mov" ]]; then
+      echo "🔬 Step 2: Checking codec..."
+      local codec
+      codec=$(ffprobe -v error -select_streams v:0 \
         -show_entries stream=codec_name,profile \
-        -of default=noprint_wrappers=1:nokey=1 "$f" 2>/dev/null)
-      
-      if echo "$codec_info" | grep -iq "prores" && echo "$codec_info" | grep -iq "422" && echo "$codec_info" | grep -iq "hq"; then
-        is_prores=true
-      fi
+        -of default=noprint_wrappers=1:nokey=1 "$f")
+
+      echo "   ↳ codec info: $codec"
+
+      echo "$codec" | grep -qi "prores" && is_prores=true
     fi
-    
-    # Determine output filename and conversion type
+
+    # ---------------- PRORES ----------------
     if [[ "$is_prores" == true ]]; then
-      # ProRes always converts to MP4
-      output_filename=$(get_unique_filename "$dst" "$original_filename" "mp4")
-      output_path="$dst/$output_filename"
-      should_convert=true
-      
-      echo "🎬 Converting ProRes 422 HQ to MP4: ${f:t}"
-      echo "   📝 Output: $output_filename"
-      
-      # Convert ProRes 422 HQ to H.264 MP4
-      if ffmpeg -i "$f" \
+      echo "⚡ Step 3: ProRes detected → converting to MP4"
+      output=$(get_unique_filename "$dst" "$base" "mp4")
+
+      echo "📦 Output file: $output"
+      echo "🎥 Running ffmpeg (ProRes → H264)..."
+
+      ffmpeg -i "$f" \
         -c:v libx264 -crf 22 -preset medium \
         -c:a aac -b:a 192k \
         -movflags +faststart \
         -pix_fmt yuv420p \
-        -stats \
-        -y \
-        "$output_path" 2>&1 | grep -E "(frame=|Duration:)"; then
-        echo "   ✅ Converted: ${output_filename}"
-        ((prores_converted++))
-        
-        # Show size comparison
-        local original_size=$(stat -f%z "$f" 2>/dev/null || stat -c%s "$f" 2>/dev/null)
-        local converted_size=$(stat -f%z "$output_path" 2>/dev/null || stat -c%s "$output_path" 2>/dev/null)
-        local original_mb=$((original_size / 1048576))
-        local converted_mb=$((converted_size / 1048576))
-        echo "   📦 Size: ${original_mb}MB → ${converted_mb}MB"
+        -y "$dst/$output" >/dev/null 2>&1
+
+      if [[ $? -eq 0 ]]; then
+        echo "✅ DONE: ProRes converted successfully"
+        ((ok++))
       else
-        echo "   ❌ Failed to convert: ${f:t}"
-        ((failed++))
+        echo "❌ FAILED: ProRes conversion error"
+        ((fail++))
       fi
-      
-    elif [[ "$extension" == "mov" ]]; then
-      # Normal .mov file (not ProRes)
-      output_filename=$(get_unique_filename "$dst" "$original_filename" "mp4")
-      output_path="$dst/$output_filename"
-      should_convert=true
-      
-      echo "🎬 Converting normal MOV to MP4: ${f:t}"
-      echo "   📝 Output: $output_filename"
-      
-      # Check if it's already H.264 in a .mov container
-      local current_codec=$(ffprobe -v error -select_streams v:0 \
+
+    # ---------------- MOV ----------------
+    elif [[ "$ext" == "mov" ]]; then
+      echo "⚡ Step 3: MOV processing"
+      output=$(get_unique_filename "$dst" "$base" "mp4")
+
+      local codec
+      codec=$(ffprobe -v error -select_streams v:0 \
         -show_entries stream=codec_name \
-        -of default=noprint_wrappers=1:nokey=1 "$f" 2>/dev/null)
-      
-      if echo "$current_codec" | grep -iq "h264"; then
-        # Already H.264, just remux to MP4
-        echo "   (Already H.264, remuxing...)"
-        if ffmpeg -i "$f" \
-          -c:v copy -c:a copy \
-          -movflags +faststart \
-          -stats \
-          -y \
-          "$output_path" 2>&1 | grep -E "(frame=|Duration:)"; then
-          echo "   ✅ Remuxed to: ${output_filename}"
-          ((normal_converted++))
-        else
-          echo "   ❌ Failed to remux: ${f:t}"
-          ((failed++))
-        fi
+        -of default=noprint_wrappers=1:nokey=1 "$f")
+
+      echo "   ↳ codec: $codec"
+
+      echo "🎥 Encoding..."
+
+      if echo "$codec" | grep -qi "h264"; then
+        ffmpeg -i "$f" -c copy -movflags +faststart -y "$dst/$output" >/dev/null 2>&1
       else
-        # Transcode to H.264
-        if ffmpeg -i "$f" \
+        ffmpeg -i "$f" \
           -c:v libx264 -crf 23 -preset medium \
           -c:a aac -b:a 192k \
           -movflags +faststart \
           -pix_fmt yuv420p \
-          -stats \
-          -y \
-          "$output_path" 2>&1 | grep -E "(frame=|Duration:)"; then
-          echo "   ✅ Converted to: ${output_filename}"
-          ((normal_converted++))
-        else
-          echo "   ❌ Failed to convert: ${f:t}"
-          ((failed++))
-        fi
+          -y "$dst/$output" >/dev/null 2>&1
       fi
-      
-    elif [[ "$extension" == "mp4" ]]; then
-      # Already MP4 - check if an MP4 with same name exists and handle duplicates
-      local existing_mp4="${dst}/${original_filename}.mp4"
-      
-      if [[ -f "$existing_mp4" ]]; then
-        # File exists, generate unique name
-        output_filename=$(get_unique_filename "$dst" "$original_filename" "mp4")
-        output_path="$dst/$output_filename"
-        echo "⚠️  Conflict: ${original_filename}.mp4 already exists"
-        echo "   📝 Using: $output_filename"
-      else
-        output_filename="${original_filename}.mp4"
-        output_path="$dst/$output_filename"
-      fi
-      
-      echo "📋 MP4 file detected: ${f:t}"
-      echo "   📝 Output: $output_filename"
-      
-      # Check if it has faststart flag
-      if ffprobe -v error -show_entries format=flags \
-        -of default=noprint_wrappers=1:nokey=1 "$f" 2>/dev/null | grep -q "faststart"; then
-        echo "   (Already has faststart, copying...)"
-        cp "$f" "$output_path" 2>/dev/null
-      else
-        echo "   (Adding faststart flag...)"
-        ffmpeg -i "$f" \
-          -c:v copy -c:a copy \
-          -movflags +faststart \
-          -y \
-          "$output_path" 2>/dev/null
-      fi
-      
+
       if [[ $? -eq 0 ]]; then
-        echo "   ✅ Processed: ${output_filename}"
-        ((skipped++))
+        echo "✅ DONE: MOV processed"
+        ((ok++))
       else
-        echo "   ❌ Failed to process: ${f:t}"
-        ((failed++))
+        echo "❌ FAILED: MOV error"
+        ((fail++))
       fi
-      
-    elif [[ "$extension" == "mkv" || "$extension" == "avi" || "$extension" == "webm" ]]; then
-      # Convert other video formats to MP4
-      output_filename=$(get_unique_filename "$dst" "$original_filename" "mp4")
-      output_path="$dst/$output_filename"
-      should_convert=true
-      
-      echo "🎬 Converting ${extension:u} to MP4: ${f:t}"
-      echo "   📝 Output: $output_filename"
-      
-      if ffmpeg -i "$f" \
-        -c:v libx264 -crf 23 -preset medium \
-        -c:a aac -b:a 192k \
-        -movflags +faststart \
-        -pix_fmt yuv420p \
-        -stats \
-        -y \
-        "$output_path" 2>&1 | grep -E "(frame=|Duration:)"; then
-        echo "   ✅ Converted to: ${output_filename}"
-        ((normal_converted++))
+
+    # ---------------- MP4 ----------------
+    elif [[ "$ext" == "mp4" ]]; then
+      echo "⚡ Step 3: MP4 optimization (faststart fix)"
+      output=$(get_unique_filename "$dst" "$base" "mp4")
+
+      ffmpeg -i "$f" \
+        -c copy -movflags +faststart \
+        -y "$dst/$output" >/dev/null 2>&1
+
+      if [[ $? -eq 0 ]]; then
+        echo "✅ DONE: MP4 optimized"
+        ((ok++))
       else
-        echo "   ❌ Failed to convert: ${f:t}"
-        ((failed++))
+        echo "❌ FAILED: MP4 fix error"
+        ((fail++))
       fi
-      
+
+    # ---------------- OTHER ----------------
     else
-      # Unknown format, just copy with unique name
-      local new_filename=$(get_unique_filename "$dst" "$original_filename" "$extension")
-      echo "⚠️  Unknown format, copying as-is: ${f:t}"
-      echo "   📝 Output: $new_filename"
-      cp "$f" "$dst/$new_filename" 2>/dev/null
+      echo "⚡ Step 3: Unsupported format → copying"
+      output=$(get_unique_filename "$dst" "$base" "$ext")
+
+      cp "$f" "$dst/$output"
+
       if [[ $? -eq 0 ]]; then
-        ((skipped++))
+        echo "📦 COPIED: $output"
+        ((ok++))
       else
-        echo "   ❌ Failed to copy: ${f:t}"
-        ((failed++))
+        echo "❌ COPY FAILED"
+        ((fail++))
       fi
     fi
-    
-    # Check disk space after each operation
-    local remaining_space=$(df "$PWD" | awk 'NR==2 {print $4}')
-    if [[ $remaining_space -lt $min_space_required ]]; then
-      echo "⚠️  Low disk space (${remaining_space}KB remaining)!"
-      echo "🛑 Stopping conversion to prevent disk full"
-      break
-    fi
-    
+
+    echo "💾 Step 4: File finished"
     echo ""
   done
-  
-  # Summary
-  echo "═══════════════════════════════════════════════"
-  echo "📊 CONVERSION SUMMARY"
-  echo "   ✅ ProRes 422 HQ converted: $prores_converted"
-  echo "   ✅ Normal videos converted: $normal_converted"
-  echo "   📋 Files copied/processed: $skipped"
-  [[ $failed -gt 0 ]] && echo "   ❌ Failed conversions: $failed"
-  
-  local total_processed=$((prores_converted + normal_converted + skipped))
-  echo "   📁 Total files processed: $total_processed"
-  echo "   📂 Output directory: $dst"
-  
-  # Smart cleanup options
-  echo ""
-  echo "═══════════════════════════════════════════════"
-  echo "🗑️  ORIGINAL FILES MANAGEMENT"
-  
-  if [[ "$keep_originals" == "true" ]]; then
-    echo "📁 Original files kept in: $src"
-    echo "💡 Tip: You can manually delete them when you need space:"
-    echo "   rm -rf \"$src\""
-  else
-    local confirmed=false
-    
-    # Check disk space trend
-    local final_space=$(df "$PWD" | awk 'NR==2 {print $4}')
-    local space_percent=$((final_space * 100 / available_space))
-    
-    if [[ $space_percent -lt 30 ]]; then
-      echo "💾 Disk space is getting low (${space_percent}% remaining)"
-      echo "🗑️  Would you like to delete original files to free up space?"
-      read "delete?Delete originals? (yes/no): "
-      [[ "$delete" == "yes" ]] && confirmed=true
-    else
-      echo "💾 Disk space is healthy (${space_percent}% remaining)"
-      echo "🗑️  Delete original files? (you can always re-normalize from originals)"
-      read "delete?Delete originals? (yes/no): "
-      [[ "$delete" == "yes" ]] && confirmed=true
-    fi
-    
-    if [[ "$confirmed" == true ]]; then
-      echo "🗑️  Deleting original folder: $src"
-      rm -rf "$src"
-      local new_space=$(df "$PWD" | awk 'NR==2 {print $4}')
-      local freed=$((new_space - final_space))
-      echo "✅ Freed $(($freed / 1024))MB of space"
-    else
-      echo "📁 Original files kept in: $src"
-      echo "💡 Run this later to free up space: rm -rf \"$src\""
-    fi
-  fi
-  
-  echo "✅ Normalization process completed."
-  
-  # Final space info
-  local final_space=$(df "$PWD" | awk 'NR==2 {print $4}')
-  echo "💾 Final available space: $(($final_space / 1024))MB"
-  
-  return $failed
-}
 
+  echo "════════════════════════════"
+  echo "🏁 DONE"
+  echo "✔ Success: $ok"
+  echo "❌ Failed: $fail"
+  echo "📁 Output: $dst"
+  echo "════════════════════════════"
+
+  return $fail
+}
 
 resolveify_dir() {
   local src="$1"
